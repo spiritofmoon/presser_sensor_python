@@ -1,3 +1,4 @@
 v7_1版本将两个传感器的差值拿出来，单独画了一个折线图
 v7.2尝试并且添加了一个DISPLAY_PACKET_COUNT参数用于控制折线图中显示数据包的多少
 v7.3添加了一个记录到本地的按钮 可以使用wifi_send_data2server_v6.1 传感器6.1版本设置了新的模式 能达到150+hz的气压检测频率
+考虑修改一下get_sensor_thread中的sleep参数
