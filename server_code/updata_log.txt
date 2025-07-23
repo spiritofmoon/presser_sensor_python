@@ -3,3 +3,8 @@ v7.2尝试并且添加了一个DISPLAY_PACKET_COUNT参数用于控制折线图�
 v7.3添加了一个记录到本地的按钮 可以使用wifi_send_data2server_v6.1 传感器6.1版本设置了新的模式 能达到150+hz的气压检测频率
 考虑修改一下get_sensor_thread中的sleep参数
 v7.4天假了一个MAX_POINTS_PER_PACKET变量防止接收到的数据过长，当超过这个变量长度的数据包会直接丢弃，在handle_client函数中添加了判断程序
+
+
+传感器v6.2新增了传感器加载错误时，控制台会输出错误传感器编号，并且会闪灯提示。请注意此版本删除了之前的传感器加载错误重启机制。
+
+架构更新，服务器端只负责转发数据，由pc链接服务器负责数据处理 服务器运行relay_server.py即可 pc程序放在sensor_dataprocess_in_pc目录中

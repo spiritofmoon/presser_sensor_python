@@ -1,4 +1,5 @@
 # 双通道气压传感器（200Hz高速优化完整版）
+# 修改版：增加了对特定传感器错误的识别和LED闪烁报警功能
 import network
 import socket
 import time
@@ -14,7 +15,13 @@ SERVER_IP = "117.72.10.210"  # 服务器IP地址
 SERVER_PORT = 5000  # 服务器端口
 SAMPLE_RATE = 200  # 采样率 (Hz)
 BUFFER_SIZE = 1000  # 缓冲区大小
-# =====================
+
+# ===== 新增：错误报警LED配置 =====
+# 请根据您外接LED的GPIO引脚修改此值。
+# 注意：ESP32-S3-ZERO的板载LED是NeoPixel，不能用此方法直接控制。
+# 这是一个通用示例，适用于外接的普通LED。
+LED_PIN = 13
+# =================================
 
 # 传感器缓冲区
 sensor_data_buffer1 = []
@@ -167,6 +174,18 @@ class BME280:
         return p + (var1 + var2 + self.dig_P7) / 16.0
 
 
+# ===== 新增：LED闪烁函数 =====
+def blink_error_led(pin_number):
+    """
+    错误状态闪灯。程序将在此无限循环，以指示严重的硬件初始化失败。
+    Flashes an LED in an infinite loop to indicate a critical hardware failure.
+    """
+    led = Pin(pin_number, Pin.OUT)
+    while True:
+        led.toggle()  # 切换LED状态
+        time.sleep_ms(250)
+
+
 def connect_wifi():
     """连接WiFi网络"""
     wlan = network.WLAN(network.STA_IF)
@@ -243,27 +262,48 @@ def get_sensor_thread(sensor1, sensor2):
 
 def main():
     """主程序"""
+    # ===== 修改：分别初始化传感器并捕获错误 =====
+    sensor1 = None
+    sensor2 = None
+
+    # 初始化传感器1
+    try:
+        print("Initializing Sensor 1...")
+        sensor1 = BME280(
+            spi_bus=1,
+            cs_pin=7,
+            sck_pin=8,
+            mosi_pin=9,
+            miso_pin=10
+        )
+        print("Sensor 1 initialized successfully.")
+    except Exception as e:
+        print("!!! CRITICAL ERROR: Failed to initialize Sensor 1.")
+        print(f"!!! Details: {e}")
+        print(f"!!! Blinking LED on Pin {LED_PIN} to indicate error.")
+        blink_error_led(LED_PIN)  # 失败则闪灯并停止
+
+    # 初始化传感器2
+    try:
+        print("Initializing Sensor 2...")
+        sensor2 = BME280(
+            spi_bus=2,
+            cs_pin=3,
+            sck_pin=4,
+            mosi_pin=5,
+            miso_pin=6
+        )
+        print("Sensor 2 initialized successfully.")
+    except Exception as e:
+        print("!!! CRITICAL ERROR: Failed to initialize Sensor 2.")
+        print(f"!!! Details: {e}")
+        print(f"!!! Blinking LED on Pin {LED_PIN} to indicate error.")
+        blink_error_led(LED_PIN)  # 失败则闪灯并停止
+
+    print("All sensors initialized in HIGH SPEED MODE")
+
     # 连接网络
     wlan = connect_wifi()
-
-    # 初始化传感器 (根据实际接线修改引脚)
-    sensor1 = BME280(
-        spi_bus=1,
-        cs_pin=7,
-        sck_pin=8,
-        mosi_pin=9,
-        miso_pin=10
-    )
-
-    sensor2 = BME280(
-        spi_bus=2,
-        cs_pin=3,
-        sck_pin=4,
-        mosi_pin=5,
-        miso_pin=6
-    )
-
-    print("Sensors initialized in HIGH SPEED MODE")
 
     # 创建TCP连接
     sock = create_tcp_socket()
@@ -281,7 +321,7 @@ def main():
     _thread.start_new_thread(get_sensor_thread, (sensor1, sensor2))
 
     last_send_time = time.ticks_ms()
-    send_interval = 1000  # 50ms发送间隔
+    send_interval = 1000  # 1000ms发送间隔
 
     while True:
         current_time = time.ticks_ms()
@@ -320,7 +360,7 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as e:
-        print("Critical error:", e)
+        print("Critical error in main loop:", e)
         # 重启设备
         print("Rebooting in 10 seconds...")
         time.sleep(10)
