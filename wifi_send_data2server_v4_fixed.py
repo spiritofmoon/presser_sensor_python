@@ -155,14 +155,12 @@ class BME280:
 
     def read_raw_data(self):
         # 检查数据是否就绪
-        print('check sensor data ready')
         while (self.read_byte(REG_STATUS) & 0x08) != 0:
-            # print('waiting data')
             time.sleep_ms(1)
 
         # 一次性读取所有数据寄存器
         data = self.read_bytes(REG_PRESS, 8)
-        print('raw data:', data)
+
         # 解析原始数据 (修正20位数据解析)
         press_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
         temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
@@ -256,57 +254,50 @@ def pack_data(sensor1_points, sensor2_points):
     return data
 
 
-def get_sensor_thread(sensor1, sensor2):
-    """合并后的传感器读取线程，同时读取两个传感器"""
+def get_sensor_thread(sensor, sensor_num):
+    """修改后的传感器读取线程，支持指定传感器编号"""
+    print('get_sensor_thread_start num:', sensor_num)
     global sensor_data_buffer1_1, sensor_data_buffer1_2
     global sensor_data_buffer2_1, sensor_data_buffer2_2
     global sensor1_buffer1_is_full, sensor1_buffer2_is_full
     global sensor2_buffer1_is_full, sensor2_buffer2_is_full
 
+    # 根据传感器编号选择正确的缓冲区
+    if sensor_num == 1:
+        global sensor1_buffer1_is_full, sensor1_buffer2_is_full
+        buf1 = sensor_data_buffer1_1
+        buf2 = sensor_data_buffer1_2
+        full_flag1 = sensor1_buffer1_is_full
+        full_flag2 = sensor1_buffer2_is_full
+    else:
+        global sensor2_buffer1_is_full, sensor2_buffer2_is_full
+        buf1 = sensor_data_buffer2_1
+        buf2 = sensor_data_buffer2_2
+        full_flag1 = sensor2_buffer1_is_full
+        full_flag2 = sensor2_buffer2_is_full
     first_get_sensor_data_time_ms = time.ticks_ms()
-
     while True:
         try:
-            # 读取传感器1数据
+            print('try to ge sensor data')
             current_time_difference = time.ticks_ms() - first_get_sensor_data_time_ms
-            temp1, press1, hum1 = sensor1.read_compensated_data()
-            sensor_data_arr1 = (current_time_difference, temp1, press1, 1)  # 传感器编号1
-            print(1, sensor_data_arr1)
-
-            # 读取传感器2数据
-            temp2, press2, hum2 = sensor2.read_compensated_data()
-            sensor_data_arr2 = (current_time_difference, temp2, press2, 2)  # 传感器编号2
-            print(2, sensor_data_arr2)
-
-            # 处理传感器1数据缓冲区
-            if len(sensor_data_buffer1_1) < sensor_data_buffer_max_len:
-                sensor_data_buffer1_1.append(sensor_data_arr1)
-            elif len(sensor_data_buffer1_1) >= sensor_data_buffer_max_len and len(sensor_data_buffer1_2) < sensor_data_buffer_max_len:
-                sensor_data_buffer1_2.append(sensor_data_arr1)
-                sensor1_buffer1_is_full = True
-            elif len(sensor_data_buffer1_1) >= sensor_data_buffer_max_len and len(sensor_data_buffer1_2) >= sensor_data_buffer_max_len:
-                sensor1_buffer1_is_full = True
-                sensor1_buffer2_is_full = True
-                print("Sensor 1 buffer all full")
-
-            # 处理传感器2数据缓冲区
-            if len(sensor_data_buffer2_1) < sensor_data_buffer_max_len:
-                sensor_data_buffer2_1.append(sensor_data_arr2)
-            elif len(sensor_data_buffer2_1) >= sensor_data_buffer_max_len and len(sensor_data_buffer2_2) < sensor_data_buffer_max_len:
-                sensor_data_buffer2_2.append(sensor_data_arr2)
-                sensor2_buffer1_is_full = True
-            elif len(sensor_data_buffer2_1) >= sensor_data_buffer_max_len and len(sensor_data_buffer2_2) >= sensor_data_buffer_max_len:
-                sensor2_buffer1_is_full = True
-                sensor2_buffer2_is_full = True
-                print("Sensor 2 buffer all full")
+            temp, press, hum = sensor.read_compensated_data()
+            sensor_data_arr = (current_time_difference, temp, press, sensor_num)  # 添加传感器编号
+            print(sensor_num, sensor_data_arr)
+            if len(buf1) < sensor_data_buffer_max_len:
+                buf1.append(sensor_data_arr)
+            elif len(buf1) >= sensor_data_buffer_max_len and len(buf2) < sensor_data_buffer_max_len:
+                buf2.append(sensor_data_arr)
+                full_flag1 = True
+            elif len(buf1) >= sensor_data_buffer_max_len and len(buf2) >= sensor_data_buffer_max_len:
+                full_flag1 = True
+                full_flag2 = True
+                print(f"Sensor {sensor_num} buffer all full")
 
         except Exception as e:
-            print(f"Sensor read error:", e)
+            print(f"Sensor {sensor_num} read error:", e)
             # 尝试重新初始化传感器
             try:
-                print('try to reload sensor')
-                sensor1 = BME280(spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10)
-                sensor2 = BME280(spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
+                sensor = BME280()
             except:
                 pass
 
@@ -320,15 +311,8 @@ def main():
     sensor1 = BME280(spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
     print("Sensor initialized")
 
-    global sensor_data_buffer1_1
-    global sensor_data_buffer1_2
-    global sensor_data_buffer2_1
-    global sensor_data_buffer2_2
-
-    global sensor1_buffer1_is_full
-    global sensor1_buffer2_is_full
     global sensor2_buffer1_is_full
-    global sensor2_buffer2_is_full
+    global sensor2_buffer1_is_full
 
     # 创建TCP套接字
     sock = create_tcp_socket()
@@ -345,9 +329,9 @@ def main():
             time.sleep(5)
 
     last_second = time.time()
-    # 创建读取线程
-    _thread.start_new_thread(get_sensor_thread, (sensor, sensor1))
-
+    # 创建两个读取线程
+    _thread.start_new_thread(get_sensor_thread, (sensor, 1))
+    _thread.start_new_thread(get_sensor_thread, (sensor1, 2))
     while True:
         try:
             current_time = time.time()
@@ -378,7 +362,7 @@ def main():
                     sensor_data_buffer2_2 = []
                     sensor2_buffer2_is_full = False
 
-                #发送数据（优先发送主缓冲区）
+                # 发送数据（优先发送主缓冲区）
                 if send_buf1_1 or send_buf2_1:
                     try:
                         packed = pack_data(send_buf1_1 if send_buf1_1 else [],
@@ -409,29 +393,20 @@ def main():
             time.sleep(1)
             # 尝试重新初始化传感器
             try:
-                # 重新初始化两个传感器
-                sensor = BME280(spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10)
-                sensor1 = BME280(spi_bus=2, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
-                # 重新启动读取线程
-                _thread.start_new_thread(get_sensor_thread, (sensor, sensor1))
-            except Exception as sensor_error:
-                print("Sensor reinitialization failed:", sensor_error)
-
+                sensor = BME280()
+            except:
+                pass
             # 尝试重新连接网络
             if not wlan.isconnected():
-                try:
-                    wlan = connect_wifi()
-                except Exception as wifi_error:
-                    print("WiFi reconnection failed:", wifi_error)
-
+                wlan = connect_wifi()
             # 尝试重新连接socket
             try:
                 sock.close()
-                sock = create_tcp_socket()
-                sock.connect((SERVER_IP, SERVER_PORT))
-            except Exception as socket_error:
-                print("Socket reconnection failed:", socket_error)
-        time.sleep(0.002)
+            except:
+                pass
+            sock = create_tcp_socket()
+            sock.connect((SERVER_IP, SERVER_PORT))
+
 
 if __name__ == '__main__':
     main()

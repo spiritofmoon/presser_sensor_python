@@ -4,23 +4,12 @@ import time
 from machine import Pin, SPI
 import struct
 import math
-import _thread
-
 
 # WiFi配置
 WIFI_SSID = "chen"
 WIFI_PASSWORD = "98765432"
 SERVER_IP = "117.72.10.210"  # 替换为服务器IP
 SERVER_PORT = 5000
-sensor_data_buffer_max_len = 200
-
-sensor_data_buffer1 = []
-sensor_data_buffer2 = []
-
-sensor_data_buffer1_lock = False
-sensor_data_buffer2_lock = False
-sensor_data_buffer1_is_full = False
-sensor_data_buffer2_is_full = False
 
 # BME280寄存器地址
 REG_ID      = 0xD0
@@ -36,12 +25,10 @@ REG_CALIB   = 0x88  # 校准参数起始地址
 
 # 传感器配置
 SAMPLE_RATE = 100  # 100Hz采样率
-delay_time = 1/SAMPLE_RATE
 BUFFER_SIZE = SAMPLE_RATE * 3  # 100个点的3个参数(温度、气压、湿度)
 
 class BME280:
-    def __init__(self, spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6):
-    # def __init__(self, spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10):
+    def __init__(self, spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10):
         # 初始化SPI接口 (尝试两种模式)
         try:
             # 先尝试模式0
@@ -148,19 +135,18 @@ class BME280:
     def read_raw_data(self):
         # 检查数据是否就绪
         while (self.read_byte(REG_STATUS) & 0x08) != 0:
-            print('waiting data')
             time.sleep_ms(1)
         
         # 一次性读取所有数据寄存器
         data = self.read_bytes(REG_PRESS, 8)
-        print(data)
+        
         # 解析原始数据 (修正20位数据解析)
         press_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
         temp_raw  = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
         hum_raw   = (data[6] << 8) | data[7]
         
         # 调试输出原始数据
-        #print(f"Raw data: P={press_raw}, T={temp_raw}, H={hum_raw}")
+        print(f"Raw data: P={press_raw}, T={temp_raw}, H={hum_raw}")
         
         return temp_raw, press_raw, hum_raw
     
@@ -225,46 +211,12 @@ def create_tcp_socket():
     sock.settimeout(5)
     return sock
 
-
 def pack_data(points):
-    """打包传感器数据为二进制格式，每个点只包含时间差、温度和气压"""
-    num_points = len(points)
-    data = struct.pack("!I", num_points)  # 4字节包头（数据点数）
-    for point in points:
-        # 解包时间差、温度和气压（忽略湿度）
-        time_diff, temp, press = point
-        # 每个点：4字节时间差 + 4字节温度 + 4字节气压
-        data += struct.pack("!Iff", time_diff, temp, press)
+    """打包100组传感器数据为二进制格式"""
+    data = struct.pack("!I", int(time.time()))  # 4字节时间戳
+    for temp, press, hum in points:
+        data += struct.pack("!fff", temp, press, hum)  # 每个点12字节
     return data
-
-def get_sensor_thread(sensor):
-    global sensor_data_buffer1
-    global sensor_data_buffer2
-    global sensor_data_buffer1_is_full
-    global sensor_data_buffer2_is_full
-    first_get_sensor_data_time_ms = time.ticks_ms()
-    while True:
-        try:
-            current_time_difference = time.ticks_ms()-first_get_sensor_data_time_ms
-            temp, press, hum = sensor.read_compensated_data()
-            sensor_data_arr = (current_time_difference,temp,press)
-            if len(sensor_data_buffer1)<sensor_data_buffer_max_len:
-                sensor_data_buffer1.append(sensor_data_arr)
-            elif len(sensor_data_buffer1)>=sensor_data_buffer_max_len and len(sensor_data_buffer2)<sensor_data_buffer_max_len:
-                sensor_data_buffer2.append(sensor_data_arr)
-                sensor_data_buffer1_is_full = True
-            elif len(sensor_data_buffer1)>=sensor_data_buffer_max_len and len(sensor_data_buffer2)>=sensor_data_buffer_max_len:
-                sensor_data_buffer1_is_full = True
-                sensor_data_buffer2_is_full = True
-                print("buffer all fulls")
-        except Exception as e:
-            print("Sensor read error:", e)
-            # 尝试重新初始化传感器
-            try:
-                sensor = BME280()
-            except:
-                pass
-        #time.sleep(0.001)
 
 def main():
     # 初始化网络
@@ -274,15 +226,9 @@ def main():
     sensor = BME280()
     print("Sensor initialized")
     
-    global sensor_data_buffer1
-    global sensor_data_buffer2
-    global sensor_data_buffer1_is_full
-    global sensor_data_buffer2_is_full
-
-    
     # 创建TCP套接字
     sock = create_tcp_socket()
-
+    
     # 尝试连接服务器
     while True:
         try:
@@ -295,63 +241,53 @@ def main():
             time.sleep(5)
     
     last_second = time.time()
-    _thread.start_new_thread(get_sensor_thread, (sensor,))
+    data_buffer = []
+    
     while True:
         try:
             current_time = time.time()
             elapsed = current_time - last_second
             
-            # 每秒检查一次缓冲区
-            if elapsed >= 0.1:
-                # 复制当前缓冲区内容并清空（线程安全）
-                send_buffer = None
-                if len(sensor_data_buffer1)>=sensor_data_buffer_max_len/2:
-                    send_buffer = sensor_data_buffer1[:]  # 复制缓冲区内容
-                    sensor_data_buffer1 = []              # 清空原缓冲区
-                    sensor_data_buffer1_is_full = False
-                    print(f"Buffer1 ready with {len(send_buffer)} points")
-                
-                # 发送buffer1的数据
-                if send_buffer:
+            # 每秒发送一次
+            if elapsed >= 1.0:
+                if data_buffer:
                     try:
-                        packed = pack_data(send_buffer)
+                        packed = pack_data(data_buffer)
                         sock.sendall(packed)
-                        print(f"Sent {len(send_buffer)} samples")
+                        print(f"Sent {len(data_buffer)} samples at {current_time}")
+                        data_buffer = []  # 清空缓冲区
                     except Exception as e:
                         print("Send error:", e)
-                        # 重新连接
-                        sock.close()
+                        # 尝试重新连接
+                        try:
+                            sock.close()
+                        except:
+                            pass
                         sock = create_tcp_socket()
                         sock.connect((SERVER_IP, SERVER_PORT))
-                
-                # 检查buffer2
-                send_buffer = None
-                if len(sensor_data_buffer1)>=sensor_data_buffer_max_len/2:
-                    send_buffer = sensor_data_buffer2[:]
-                    sensor_data_buffer2 = []
-                    sensor_data_buffer2_is_full = False
-                    print(f"Buffer2 ready with {len(send_buffer)} points")
-                
-                # 发送buffer2的数据
-                if send_buffer:
-                    try:
-                        packed = pack_data(send_buffer)
-                        sock.sendall(packed)
-                        print(f"Sent {len(send_buffer)} samples")
-                    except Exception as e:
-                        print("Send error:", e)
-                        # 重新连接
-                        sock.close()
-                        sock = create_tcp_socket()
-                        sock.connect((SERVER_IP, SERVER_PORT))
+                        print("Reconnected to server")
                 
                 last_second = current_time
             
-            time.sleep(0.5)  # 减少CPU占用
+            # 采样传感器数据 (目标100Hz)
+            if len(data_buffer) < BUFFER_SIZE:
+                try:
+                    temp, press, hum = sensor.read_compensated_data()
+                    data_buffer.append((temp, press, hum))
+                except Exception as e:
+                    print("Sensor read error:", e)
+                    # 尝试重新初始化传感器
+                    try:
+                        sensor = BME280()
+                    except:
+                        pass
             
+            # 维持100Hz采样率
+            time.sleep(0.005)  # 约5ms延迟
+        
         except Exception as e:
             print("Main loop error:", e)
-            time.sleep(1)
+            time.sleep(1)  # 出错后暂停
             # 尝试重新初始化传感器
             try:
                 sensor = BME280()

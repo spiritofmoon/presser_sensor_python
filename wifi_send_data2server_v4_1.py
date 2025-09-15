@@ -1,4 +1,4 @@
-# 双通道气压传感器
+# 双通道气压传感器 (串行读取版本)
 import network
 import socket
 import time
@@ -7,21 +7,19 @@ import struct
 import math
 import _thread
 
-
 # WiFi配置
 WIFI_SSID = "chen"
 WIFI_PASSWORD = "98765432"
-SERVER_IP = "117.72.10.210"  # 替换为服务器IP
+SERVER_IP = "117.72.10.210"
 SERVER_PORT = 5000
 sensor_data_buffer_max_len = 200
 
-# 在全局变量部分添加第二个传感器的缓冲区
+# 全局变量
 sensor_data_buffer1_1 = []  # 传感器1的缓冲区1
 sensor_data_buffer1_2 = []  # 传感器1的缓冲区2
 sensor_data_buffer2_1 = []  # 传感器2的缓冲区1
 sensor_data_buffer2_2 = []  # 传感器2的缓冲区2
 
-# 对应的状态标志
 sensor1_buffer1_is_full = False
 sensor1_buffer2_is_full = False
 sensor2_buffer1_is_full = False
@@ -34,24 +32,24 @@ REG_CTRL_HUM = 0xF2
 REG_STATUS = 0xF3
 REG_CTRL_MEAS = 0xF4
 REG_CONFIG = 0xF5
-REG_PRESS = 0xF7  # 压力数据起始地址 (3字节)
-REG_TEMP = 0xFA  # 温度数据起始地址 (3字节)
-REG_HUM = 0xFD  # 湿度数据起始地址 (2字节)
-REG_CALIB = 0x88  # 校准参数起始地址
+REG_PRESS = 0xF7
+REG_TEMP = 0xFA
+REG_HUM = 0xFD
+REG_CALIB = 0x88
 
 # 传感器配置
 SAMPLE_RATE = 100  # 100Hz采样率
 delay_time = 1 / SAMPLE_RATE
-BUFFER_SIZE = SAMPLE_RATE * 3  # 100个点的3个参数(温度、气压、湿度)
+BUFFER_SIZE = SAMPLE_RATE * 3
+
+# SPI总线互斥锁
+spi_lock = _thread.allocate_lock()
 
 
 class BME280:
     def __init__(self, spi_bus, cs_pin, sck_pin, mosi_pin, miso_pin):
-        # 初始化SPI接口 (尝试两种模式)
+        # 初始化SPI接口
         try:
-            # 先尝试模式0
-            print('model0')
-            print('init', spi_bus, cs_pin, sck_pin, mosi_pin, miso_pin)
             self.spi = SPI(
                 spi_bus,
                 sck=Pin(sck_pin),
@@ -63,8 +61,6 @@ class BME280:
             )
             self.spi_mode = 0
         except:
-            # 如果失败尝试模式3
-            print('model3')
             self.spi = SPI(
                 spi_bus,
                 sck=Pin(sck_pin),
@@ -92,35 +88,36 @@ class BME280:
         self.read_calibration()
 
         # 配置传感器
-        self.write_byte(REG_CTRL_HUM, 0x01)  # 湿度采样x1
-        self.write_byte(REG_CTRL_MEAS, 0x27)  # 温度/压力采样x1, 正常模式
-        self.write_byte(REG_CONFIG, 0x00)  # 滤波器关闭, 待机时间0.5ms
-        time.sleep_ms(50)  # 等待传感器稳定
+        self.write_byte(REG_CTRL_HUM, 0x01)
+        self.write_byte(REG_CTRL_MEAS, 0x27)
+        self.write_byte(REG_CONFIG, 0x00)
+        time.sleep_ms(50)
 
     def read_byte(self, reg):
-        self.cs(0)
-        self.spi.write(bytes([reg | 0x80]))  # 设置最高位为1表示读操作
-        result = self.spi.read(1)
-        self.cs(1)
+        with spi_lock:  # 添加SPI互斥锁
+            self.cs(0)
+            self.spi.write(bytes([reg | 0x80]))
+            result = self.spi.read(1)
+            self.cs(1)
         return result[0]
 
     def read_bytes(self, reg, length):
-        self.cs(0)
-        self.spi.write(bytes([reg | 0x80]))
-        result = bytearray(self.spi.read(length))
-        self.cs(1)
+        with spi_lock:  # 添加SPI互斥锁
+            self.cs(0)
+            self.spi.write(bytes([reg | 0x80]))
+            result = bytearray(self.spi.read(length))
+            self.cs(1)
         return result
 
     def write_byte(self, reg, value):
-        self.cs(0)
-        self.spi.write(bytes([reg & 0x7F, value]))  # 最高位0表示写
-        self.cs(1)
+        with spi_lock:  # 添加SPI互斥锁
+            self.cs(0)
+            self.spi.write(bytes([reg & 0x7F, value]))
+            self.cs(1)
 
     def read_calibration(self):
-        # 读取温度/压力校准参数 (0x88~0x9F)
+        # 读取校准参数（保持不变）
         calib = self.read_bytes(REG_CALIB, 24)
-
-        # 使用struct解析有符号值
         self.dig_T1 = struct.unpack("<H", calib[0:2])[0]
         self.dig_T2 = struct.unpack("<h", calib[2:4])[0]
         self.dig_T3 = struct.unpack("<h", calib[4:6])[0]
@@ -134,47 +131,30 @@ class BME280:
         self.dig_P8 = struct.unpack("<h", calib[20:22])[0]
         self.dig_P9 = struct.unpack("<h", calib[22:24])[0]
 
-        # 读取湿度校准参数 (0xE1~0xE7)
         self.dig_H1 = self.read_byte(0xA1)
         calib_h = self.read_bytes(0xE1, 7)
-
         self.dig_H2 = struct.unpack("<h", calib_h[0:2])[0]
         self.dig_H3 = calib_h[2]
         self.dig_H4 = struct.unpack("<h", bytes([calib_h[3], calib_h[4] & 0x0F]))[0]
         self.dig_H5 = struct.unpack("<h", bytes([calib_h[5], calib_h[4] >> 4]))[0]
         self.dig_H6 = struct.unpack("<b", bytes([calib_h[6]]))[0]
 
-        # 调试输出校准参数
-        print("Calibration Parameters:")
-        print(f"T1: {self.dig_T1}, T2: {self.dig_T2}, T3: {self.dig_T3}")
-        print(f"P1: {self.dig_P1}, P2: {self.dig_P2}, P3: {self.dig_P3}")
-        print(f"P4: {self.dig_P4}, P5: {self.dig_P5}, P6: {self.dig_P6}")
-        print(f"P7: {self.dig_P7}, P8: {self.dig_P8}, P9: {self.dig_P9}")
-        print(f"H1: {self.dig_H1}, H2: {self.dig_H2}, H3: {self.dig_H3}")
-        print(f"H4: {self.dig_H4}, H5: {self.dig_H5}, H6: {self.dig_H6}")
-
     def read_raw_data(self):
-        # 检查数据是否就绪
-        print('check sensor data ready')
-        while (self.read_byte(REG_STATUS) & 0x08) != 0:
-            # print('waiting data')
+        # 添加超时机制防止无限等待
+        timeout = 100  # 最大等待100ms
+        while (self.read_byte(REG_STATUS) & 0x08) != 0 and timeout > 0:
             time.sleep_ms(1)
+            timeout -= 1
+        if timeout <= 0:
+            raise Exception("Sensor data ready timeout")
 
-        # 一次性读取所有数据寄存器
         data = self.read_bytes(REG_PRESS, 8)
-        print('raw data:', data)
-        # 解析原始数据 (修正20位数据解析)
         press_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
         temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
         hum_raw = (data[6] << 8) | data[7]
-
-        # 调试输出原始数据
-        # print(f"Raw data: P={press_raw}, T={temp_raw}, H={hum_raw}")
-
         return temp_raw, press_raw, hum_raw
 
     def compensate_temperature(self, raw_temp):
-        # 温度补偿公式 (修正计算)
         var1 = (raw_temp / 16384.0 - self.dig_T1 / 1024.0) * self.dig_T2
         var2 = ((raw_temp / 131072.0 - self.dig_T1 / 8192.0) *
                 (raw_temp / 131072.0 - self.dig_T1 / 8192.0)) * self.dig_T3
@@ -182,7 +162,6 @@ class BME280:
         return self.t_fine / 5120.0
 
     def compensate_pressure(self, raw_press):
-        # 压力补偿公式 (修正计算)
         var1 = self.t_fine / 2.0 - 64000.0
         var2 = var1 * var1 * self.dig_P6 / 32768.0
         var2 = var2 + var1 * self.dig_P5 * 2.0
@@ -191,7 +170,6 @@ class BME280:
         var1 = (1.0 + var1 / 32768.0) * self.dig_P1
         if var1 == 0:
             return 0
-
         p = 1048576.0 - raw_press
         p = (p - var2 / 4096.0) * 6250.0 / var1
         var1 = self.dig_P9 * p * p / 2147483648.0
@@ -199,7 +177,6 @@ class BME280:
         return p + (var1 + var2 + self.dig_P7) / 16.0
 
     def compensate_humidity(self, raw_hum):
-        # 湿度补偿公式 (修正计算)
         var1 = self.t_fine - 76800.0
         var1 = (raw_hum - (self.dig_H4 * 64.0 + self.dig_H5 / 16384.0 * var1))
         var1 = var1 * (self.dig_H2 / 65536.0 * (1.0 + self.dig_H6 / 67108864.0 * var1 *
@@ -221,7 +198,7 @@ def connect_wifi():
     if not wlan.isconnected():
         print("Connecting to WiFi...")
         wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-        for _ in range(20):  # 等待最多20秒
+        for _ in range(20):
             if wlan.isconnected():
                 break
             time.sleep(1)
@@ -238,17 +215,13 @@ def create_tcp_socket():
 
 
 def pack_data(sensor1_points, sensor2_points):
-    """修改后的数据打包函数，处理双传感器数据"""
     num_points = len(sensor1_points) + len(sensor2_points)
-    data = struct.pack("!I", num_points)  # 4字节包头（总数据点数）
+    data = struct.pack("!I", num_points)
 
-    # 打包传感器1数据
     for point in sensor1_points:
         time_diff, temp, press, _ = point
-        # 每个点：1字节传感器ID + 4字节时间差 + 4字节温度 + 4字节气压
         data += struct.pack("!BIff", 1, time_diff, temp, press)
 
-    # 打包传感器2数据
     for point in sensor2_points:
         time_diff, temp, press, _ = point
         data += struct.pack("!BIff", 2, time_diff, temp, press)
@@ -257,7 +230,7 @@ def pack_data(sensor1_points, sensor2_points):
 
 
 def get_sensor_thread(sensor1, sensor2):
-    """合并后的传感器读取线程，同时读取两个传感器"""
+    """串行读取两个传感器"""
     global sensor_data_buffer1_1, sensor_data_buffer1_2
     global sensor_data_buffer2_1, sensor_data_buffer2_2
     global sensor1_buffer1_is_full, sensor1_buffer2_is_full
@@ -267,15 +240,16 @@ def get_sensor_thread(sensor1, sensor2):
 
     while True:
         try:
-            # 读取传感器1数据
             current_time_difference = time.ticks_ms() - first_get_sensor_data_time_ms
+
+            # 串行读取传感器1
             temp1, press1, hum1 = sensor1.read_compensated_data()
-            sensor_data_arr1 = (current_time_difference, temp1, press1, 1)  # 传感器编号1
+            sensor_data_arr1 = (current_time_difference, temp1, press1, 1)
             print(1, sensor_data_arr1)
 
-            # 读取传感器2数据
+            # 串行读取传感器2
             temp2, press2, hum2 = sensor2.read_compensated_data()
-            sensor_data_arr2 = (current_time_difference, temp2, press2, 2)  # 传感器编号2
+            sensor_data_arr2 = (current_time_difference, temp2, press2, 2)
             print(2, sensor_data_arr2)
 
             # 处理传感器1数据缓冲区
@@ -300,40 +274,29 @@ def get_sensor_thread(sensor1, sensor2):
                 sensor2_buffer2_is_full = True
                 print("Sensor 2 buffer all full")
 
+            # 保持采样率
+            time.sleep(delay_time)
+
         except Exception as e:
             print(f"Sensor read error:", e)
-            # 尝试重新初始化传感器
-            try:
-                print('try to reload sensor')
-                sensor1 = BME280(spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10)
-                sensor2 = BME280(spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
-            except:
-                pass
+            time.sleep(0.1)  # 错误恢复等待
 
 
 def main():
-    # 初始化网络
     wlan = connect_wifi()
 
-    # 初始化传感器
+    # 初始化传感器（串行访问）
     sensor = BME280(spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10)
     sensor1 = BME280(spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
-    print("Sensor initialized")
+    print("Sensors initialized")
 
-    global sensor_data_buffer1_1
-    global sensor_data_buffer1_2
-    global sensor_data_buffer2_1
-    global sensor_data_buffer2_2
+    global sensor_data_buffer1_1, sensor_data_buffer1_2
+    global sensor_data_buffer2_1, sensor_data_buffer2_2
+    global sensor1_buffer1_is_full, sensor1_buffer2_is_full
+    global sensor2_buffer1_is_full, sensor2_buffer2_is_full
 
-    global sensor1_buffer1_is_full
-    global sensor1_buffer2_is_full
-    global sensor2_buffer1_is_full
-    global sensor2_buffer2_is_full
-
-    # 创建TCP套接字
     sock = create_tcp_socket()
 
-    # 尝试连接服务器
     while True:
         try:
             print("Connecting to server...")
@@ -345,7 +308,6 @@ def main():
             time.sleep(5)
 
     last_second = time.time()
-    # 创建读取线程
     _thread.start_new_thread(get_sensor_thread, (sensor, sensor1))
 
     while True:
@@ -378,17 +340,22 @@ def main():
                     sensor_data_buffer2_2 = []
                     sensor2_buffer2_is_full = False
 
-                #发送数据（优先发送主缓冲区）
+                # 发送数据
                 if send_buf1_1 or send_buf2_1:
                     try:
                         packed = pack_data(send_buf1_1 if send_buf1_1 else [],
                                            send_buf2_1 if send_buf2_1 else [])
-                        print(packed)
                         sock.sendall(packed)
                         print(f"Sent {len(send_buf1_1 if send_buf1_1 else []) + len(send_buf2_1 if send_buf2_1 else [])} samples")
                     except Exception as e:
                         print("Send error:", e)
-                        # 重新连接处理...
+                        # 重新连接处理
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                        sock = create_tcp_socket()
+                        sock.connect((SERVER_IP, SERVER_PORT))
 
                 elif send_buf1_2 or send_buf2_2:
                     try:
@@ -398,20 +365,25 @@ def main():
                         print(f"Sent {len(send_buf1_2 if send_buf1_2 else []) + len(send_buf2_2 if send_buf2_2 else [])} samples")
                     except Exception as e:
                         print("Send error:", e)
-                        # 重新连接处理...
+                        # 重新连接处理
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                        sock = create_tcp_socket()
+                        sock.connect((SERVER_IP, SERVER_PORT))
 
                 last_second = current_time
 
-            time.sleep(0.5)
+            time.sleep(0.05)  # 减少CPU占用
 
         except Exception as e:
             print("Main loop error:", e)
             time.sleep(1)
             # 尝试重新初始化传感器
             try:
-                # 重新初始化两个传感器
                 sensor = BME280(spi_bus=1, cs_pin=7, sck_pin=8, mosi_pin=9, miso_pin=10)
-                sensor1 = BME280(spi_bus=2, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
+                sensor1 = BME280(spi_bus=1, cs_pin=3, sck_pin=4, mosi_pin=5, miso_pin=6)
                 # 重新启动读取线程
                 _thread.start_new_thread(get_sensor_thread, (sensor, sensor1))
             except Exception as sensor_error:
@@ -431,7 +403,7 @@ def main():
                 sock.connect((SERVER_IP, SERVER_PORT))
             except Exception as socket_error:
                 print("Socket reconnection failed:", socket_error)
-        time.sleep(0.002)
+
 
 if __name__ == '__main__':
     main()

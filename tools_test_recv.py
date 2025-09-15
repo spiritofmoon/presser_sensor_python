@@ -7,7 +7,8 @@ import threading
 import sys
 
 # 服务器配置
-SERVER_IP = "127.0.0.1"  # 修改为服务器IP
+SERVER_IP = "117.72.10.210"  # 修改为服务器IP
+# SERVER_IP = "127.0.0.1"  # 修改为服务器IP
 SERVER_PORT = 5000
 
 # 模拟参数

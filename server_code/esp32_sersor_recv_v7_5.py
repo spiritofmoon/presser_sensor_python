@@ -8,16 +8,21 @@ import matplotlib.animation as animation
 import numpy as np
 from collections import deque
 import matplotlib
+from matplotlib.widgets import Button  # 导入按钮组件
 
 matplotlib.use('TkAgg')
 
 # Configuration
 SERVER_IP = "0.0.0.0"  # Listen on all interfaces
 SERVER_PORT = 5000
-SAVE_DATA = True  # Set to True to save data to CSV
 SAVE_FILE = "sensor_data.csv"
 PLOT_WINDOW_SIZE = 10000  # 10 seconds of data at 100Hz
 BUFFER_SIZE = 1024 * 8
+DISPLAY_PACKET_COUNT = 10  # 只显示最近N个数据包的数据
+MAX_POINTS_PER_PACKET = 1000  # 正常单次发送不超过400点，设置1000为安全上限
+
+# 添加记录状态标志
+is_recording = False  # 初始状态为未记录
 
 # Data buffers
 sensor1_data = deque(maxlen=PLOT_WINDOW_SIZE)
@@ -32,6 +37,7 @@ lock = threading.Lock()
 # 全局时间戳偏移量，确保时间戳连续
 global_time_offset = 0
 last_timestamp = 0
+recent_packet_ranges = deque(maxlen=DISPLAY_PACKET_COUNT)  # 存储最近N个数据包的时间范围
 
 # 创建第一个图形窗口 - 原始传感器数据
 fig1, ax1 = plt.subplots(figsize=(14, 8))
@@ -56,12 +62,20 @@ stats_text = ax1.text(0.98, 0.95, '', transform=ax1.transAxes,
                       verticalalignment='top', horizontalalignment='right',
                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
+# 添加数据包计数文本
+packet_count_text = ax1.text(0.98, 0.05, f'Displaying {DISPLAY_PACKET_COUNT} recent packets',
+                             transform=ax1.transAxes,
+                             verticalalignment='bottom', horizontalalignment='right',
+                             bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+
+# 添加记录状态文本
+recording_text = ax1.text(0.02, 0.05, 'Recording: OFF', transform=ax1.transAxes,
+                          verticalalignment='bottom', horizontalalignment='left',
+                          bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5),
+                          color='red', fontweight='bold')
+
 # 设置标题
 ax1.set_title('Real-time Pressure Monitoring')
-
-# 设置初始范围
-ax1.set_ylim(-10, 10)
-ax1.set_xlim(0, 10000)
 
 # 创建第二个图形窗口 - 专门显示压力差值
 fig2, ax4 = plt.subplots(figsize=(14, 6))
@@ -71,18 +85,52 @@ ax4.set_ylabel('Pressure Difference (S1-S2) hPa', color='green')
 ax4.grid(True, linestyle='--', alpha=0.6)
 ax4.tick_params(axis='y', labelcolor='green')
 ax4.set_title('Pressure Difference (Sensor1 - Sensor2)')
-ax4.set_ylim(-10, 10)
-ax4.set_xlim(0, 10000)
 
 # 在第二个窗口中绘制压力差值线
 diff_pressure_line_only, = ax4.plot([], [], 'g-', label='Pressure Diff (S1-S2)', alpha=0.8)
 ax4.legend(loc='upper right')
 
-# Create CSV file if saving is enabled
-if SAVE_DATA:
-    with open(SAVE_FILE, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['timestamp', 'sensor_id', 'pressure'])
+# 第二个窗口的数据包计数文本
+ax4.text(0.98, 0.05, f'Displaying {DISPLAY_PACKET_COUNT} recent packets',
+         transform=ax4.transAxes,
+         verticalalignment='bottom', horizontalalignment='right',
+         bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.5))
+
+# 初始设置坐标轴范围（后续自动调整）
+ax1.set_ylim(-10, 10)
+ax1.set_xlim(0, 10000)
+ax4.set_ylim(-10, 10)
+ax4.set_xlim(0, 10000)
+
+# 创建记录按钮
+ax_button = plt.axes([0.02, 0.9, 0.1, 0.05])  # [left, bottom, width, height]
+record_button = Button(ax_button, 'Start Recording', color='lightgray', hovercolor='0.8')
+record_button.label.set_fontsize(10)
+
+
+# 记录按钮点击事件处理
+def toggle_recording(event):
+    global is_recording
+    is_recording = not is_recording
+
+    # 更新按钮文本和记录状态显示
+    if is_recording:
+        record_button.label.set_text('Stop Recording')
+        recording_text.set_text('Recording: ON')
+        recording_text.set_color('green')
+        print("Recording started...")
+    else:
+        record_button.label.set_text('Start Recording')
+        recording_text.set_text('Recording: OFF')
+        recording_text.set_color('red')
+        print("Recording stopped.")
+
+    # 更新图形界面
+    fig1.canvas.draw_idle()
+
+
+# 绑定按钮点击事件
+record_button.on_clicked(toggle_recording)
 
 
 def handle_client(conn, addr):
@@ -92,30 +140,47 @@ def handle_client(conn, addr):
             # Read packet header (4 bytes - number of points)
             header = conn.recv(4)
             if not header:
+                print(f"Client {addr} disconnected cleanly.")
                 break
 
             num_points = struct.unpack("!I", header)[0]
+
+            # 添加数据包长度检查
+            if num_points > MAX_POINTS_PER_PACKET:
+                # <--- MODIFICATION START --->
+                # 代码修改开始
+                print(f"异常数据包！点数过多: {num_points} (正常应 < {MAX_POINTS_PER_PACKET})")
+                print("数据流已损坏，无法恢复。正在关闭此连接以强制客户端重新同步。")
+                # 不再尝试读取和丢弃数据，因为这会导致阻塞。
+                # 直接中断循环，函数末尾的 conn.close() 将会执行。
+                break
+                # <--- MODIFICATION END --->
+                # 代码修改结束
+
             print(f"Receiving {num_points} points")
 
             # Read all data points
             data = b''
-            while len(data) < num_points * 13:  # Each point is 13 bytes
-                chunk = conn.recv(BUFFER_SIZE)
+            bytes_to_read = num_points * 13  # Each point is 13 bytes
+            while len(data) < bytes_to_read:
+                chunk = conn.recv(min(BUFFER_SIZE, bytes_to_read - len(data)))
                 if not chunk:
+                    # Connection closed before all data was received
+                    print("Connection lost while receiving data packet.")
                     break
                 data += chunk
 
-            if len(data) < num_points * 13:
-                print(f"Incomplete data received: {len(data)} bytes")
+            if len(data) < bytes_to_read:
+                # If the loop was broken by connection loss, we exit the main while loop too.
                 break
 
             process_data(data, num_points)
 
         except (ConnectionResetError, BrokenPipeError):
-            print(f"Client {addr} disconnected")
+            print(f"Client {addr} disconnected abruptly.")
             break
         except Exception as e:
-            print(f"Error handling client: {e}")
+            print(f"Error handling client {addr}: {e}")
             break
 
     conn.close()
@@ -127,6 +192,10 @@ def process_data(data, num_points):
 
     sensor1_points = []
     sensor2_points = []
+
+    # 记录数据包的时间范围
+    packet_min_time = float('inf')
+    packet_max_time = -float('inf')
 
     # Parse all data points
     for i in range(num_points):
@@ -141,10 +210,20 @@ def process_data(data, num_points):
 
         adjusted_timestamp = timestamp + global_time_offset
 
+        # 更新数据包时间范围
+        if adjusted_timestamp < packet_min_time:
+            packet_min_time = adjusted_timestamp
+        if adjusted_timestamp > packet_max_time:
+            packet_max_time = adjusted_timestamp
+
         if sensor_id == 1:
             sensor1_points.append((adjusted_timestamp, pressure))
         elif sensor_id == 2:
             sensor2_points.append((adjusted_timestamp, pressure))
+
+    # 存储数据包时间范围
+    with lock:
+        recent_packet_ranges.append((packet_min_time, packet_max_time))
 
     # 更新最后时间戳
     if sensor1_points:
@@ -152,14 +231,18 @@ def process_data(data, num_points):
     elif sensor2_points:
         last_timestamp = sensor2_points[-1][0]
 
-    # Save to CSV
-    if SAVE_DATA:
-        with open(SAVE_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            for ts, p in sensor1_points:
-                writer.writerow([ts, 1, p])
-            for ts, p in sensor2_points:
-                writer.writerow([ts, 2, p])
+    # 只有在记录状态下才保存到CSV
+    if is_recording:
+        try:
+            with open(SAVE_FILE, 'a', newline='') as f:
+                writer = csv.writer(f)
+                for ts, p in sensor1_points:
+                    writer.writerow([ts, 1, p])
+                for ts, p in sensor2_points:
+                    writer.writerow([ts, 2, p])
+            # print(f"Saved {len(sensor1_points) + len(sensor2_points)} data points to CSV")
+        except Exception as e:
+            print(f"Error saving data to CSV: {e}")
 
     # Calculate statistics for this packet
     if sensor1_points:
@@ -196,32 +279,50 @@ def process_data(data, num_points):
 
     # 计算差值并存储
     min_len = min(len(sensor1_points), len(sensor2_points))
-    for i in range(min_len):
-        ts1, p1 = sensor1_points[i]
-        ts2, p2 = sensor2_points[i]
-        # 压力差值 (sensor1 - sensor2)
-        pressure_diff = p1 - p2
-        # 使用sensor1的时间戳作为横坐标
+    if min_len > 0:
+        diff_points = []
+        for i in range(min_len):
+            ts1, p1 = sensor1_points[i]
+            # 假设sensor2_points与sensor1_points的时间戳基本对应
+            _, p2 = sensor2_points[i]
+            # 压力差值 (sensor1 - sensor2)
+            pressure_diff = p1 - p2
+            # 使用sensor1的时间戳作为横坐标
+            diff_points.append((ts1, pressure_diff))
+
         with lock:
-            diff_pressure.append((ts1, pressure_diff))
+            diff_pressure.extend(diff_points)
+
+        print(f"Added {len(sensor1_points)} sensor1 points, {len(sensor2_points)} sensor2 points")
+        diff_p_vals = [p for _, p in diff_points]
+        print(f"Added {min_len} difference points (pressure diff range: {min(diff_p_vals):.4f} to {max(diff_p_vals):.4f})")
 
     # Add to global buffers
     with lock:
         sensor1_data.extend(sensor1_points)
         sensor2_data.extend(sensor2_points)
 
-    print(f"Added {len(sensor1_points)} sensor1 points, {len(sensor2_points)} sensor2 points")
-    if min_len > 0:
-        print(f"Added {min_len} difference points (pressure diff range: {min([p for _, p in diff_pressure]):.4f} to {max([p for _, p in diff_pressure]):.4f})")
-
 
 def update_main_plot(frame):
     with lock:
-        # Get data for plotting
-        s1_ts = [x[0] for x in sensor1_data]
-        s1_p = [x[1] for x in sensor1_data]
-        s2_ts = [x[0] for x in sensor2_data]
-        s2_p = [x[1] for x in sensor2_data]
+        # 只保留最近DISPLAY_PACKET_COUNT个数据包的数据
+        if recent_packet_ranges:
+            # 计算需要显示的最早时间戳
+            min_display_ts = min([range[0] for range in recent_packet_ranges])
+
+            # 过滤数据
+            s1_data = [x for x in sensor1_data if x[0] >= min_display_ts]
+            s1_ts = [x[0] for x in s1_data]
+            s1_p = [x[1] for x in s1_data]
+
+            s2_data = [x for x in sensor2_data if x[0] >= min_display_ts]
+            s2_ts = [x[0] for x in s2_data]
+            s2_p = [x[1] for x in s2_data]
+        else:
+            s1_ts = []
+            s1_p = []
+            s2_ts = []
+            s2_p = []
 
         # Update line data for first window
         sensor1_line.set_data(s1_ts, s1_p)
@@ -252,28 +353,37 @@ def update_main_plot(frame):
             # 动态调整X轴范围
             ax1.set_xlim(min_ts - 100, max_ts + 1000)  # 添加100ms前缀和1000ms后缀
 
-        # 更新Y轴范围
-        if s1_p or s2_p:
-            all_left = []
-            if s1_p: all_left.extend(s1_p)
-            if s2_p: all_left.extend(s2_p)
-            min_left = min(all_left)
-            max_left = max(all_left)
-            margin_left = max(0.1, (max_left - min_left) * 0.2)  # 至少0.1的边距
-            ax1.set_ylim(min_left - margin_left, max_left + margin_left)
+            # 更新Y轴范围
+            if s1_p or s2_p:
+                all_left = []
+                if s1_p: all_left.extend(s1_p)
+                if s2_p: all_left.extend(s2_p)
+                min_left = min(all_left)
+                max_left = max(all_left)
+                margin_left = max(0.1, (max_left - min_left) * 0.2)  # 至少0.1的边距
+                ax1.set_ylim(min_left - margin_left, max_left + margin_left)
 
     # 返回所有需要更新的对象
-    return sensor1_line, sensor2_line, stats_text
+    return sensor1_line, sensor2_line, stats_text, packet_count_text, recording_text
 
 
 def update_diff_plot(frame):
     with lock:
-        # 获取差值数据
-        diff_ts = [x[0] for x in diff_pressure]
-        diff_p = [x[1] for x in diff_pressure]
+        # 只保留最近DISPLAY_PACKET_COUNT个数据包的数据
+        if recent_packet_ranges:
+            # 计算需要显示的最早时间戳
+            min_display_ts = min([range[0] for range in recent_packet_ranges])
+
+            # 过滤数据
+            diff_data = [x for x in diff_pressure if x[0] >= min_display_ts]
+            diff_ts = [x[0] for x in diff_data]
+            diff_p_val = [x[1] for x in diff_data]
+        else:
+            diff_ts = []
+            diff_p_val = []
 
         # 更新第二个窗口的压力差值线
-        diff_pressure_line_only.set_data(diff_ts, diff_p)
+        diff_pressure_line_only.set_data(diff_ts, diff_p_val)
 
         # 更新第二个窗口的坐标轴范围
         if diff_ts:
@@ -282,9 +392,9 @@ def update_diff_plot(frame):
             # 动态调整X轴范围
             ax4.set_xlim(min_ts - 100, max_ts + 1000)  # 添加100ms前缀和1000ms后缀
 
-        if diff_p:
-            min_diff = min(diff_p)
-            max_diff = max(diff_p)
+        if diff_p_val:
+            min_diff = min(diff_p_val)
+            max_diff = max(diff_p_val)
             margin_diff = max(0.1, (max_diff - min_diff) * 0.2)  # 至少0.1的边距
             ax4.set_ylim(min_diff - margin_diff, max_diff + margin_diff)
 

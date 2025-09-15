@@ -8,6 +8,7 @@ import matplotlib.animation as animation
 import numpy as np
 from collections import deque
 import matplotlib
+
 matplotlib.use('TkAgg')
 
 # Configuration
@@ -66,8 +67,8 @@ ax1.legend(lines, [l.get_label() for l in lines], loc='upper left')
 
 # 添加统计信息文本
 stats_text = ax1.text(0.98, 0.95, '', transform=ax1.transAxes,
-                     verticalalignment='top', horizontalalignment='right',
-                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                      verticalalignment='top', horizontalalignment='right',
+                      bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
 # 设置标题
 ax1.set_title('Real-time Pressure Monitoring with Differences')
@@ -188,7 +189,7 @@ def process_data(data, num_points):
         pressure_diff = p1 - p2
         # 时间戳差值 *10 (ts1 - ts2)*10
         ts_diff = (ts1 - ts2) * 10
-        
+
         # 使用sensor1的时间戳作为横坐标
         with lock:
             diff_pressure.append((ts1, pressure_diff))
@@ -198,7 +199,7 @@ def process_data(data, num_points):
     with lock:
         sensor1_data.extend(sensor1_points)
         sensor2_data.extend(sensor2_points)
-        
+
     print(f"Added {len(sensor1_points)} sensor1 points, {len(sensor2_points)} sensor2 points")
     if min_len > 0:
         print(f"Added {min_len} difference points (pressure diff range: {min([p for _, p in diff_pressure]):.4f} to {max([p for _, p in diff_pressure]):.4f}, timestamp diff range: {min([t for _, t in diff_timestamp]):.4f} to {max([t for _, t in diff_timestamp]):.4f})")
@@ -244,23 +245,23 @@ def update_plot(frame):
         if s2_ts: all_ts.extend(s2_ts)
         if diff_ts: all_ts.extend(diff_ts)
         if diff_ts_ts: all_ts.extend(diff_ts_ts)
-        
+
         if all_ts:
             min_ts = min(all_ts)
             max_ts = max(all_ts)
             ax1.set_xlim(min_ts - 100, max_ts + 100)
-            
+
         # 更新左侧Y轴（原始传感器数据）的范围
         all_left = []
         if s1_p: all_left.extend(s1_p)
         if s2_p: all_left.extend(s2_p)
-        
+
         if all_left:
             min_left = min(all_left)
             max_left = max(all_left)
             margin_left = (max_left - min_left) * 0.1
             ax1.set_ylim(min_left - margin_left, max_left + margin_left)
-        
+
         # 更新右侧Y轴（压力差值）的范围
         if diff_p:
             min_right1 = min(diff_p)
@@ -268,7 +269,7 @@ def update_plot(frame):
             margin_right1 = (max_right1 - min_right1) * 0.1
             if margin_right1 < 0.1: margin_right1 = 0.1
             ax2.set_ylim(min_right1 - margin_right1, max_right1 + margin_right1)
-        
+
         # 更新右侧Y轴（时间戳差值）的范围
         if diff_ts_val:
             min_right2 = min(diff_ts_val)
@@ -303,10 +304,10 @@ def start_server():
 
     # Start the plot animation
     ani = animation.FuncAnimation(
-        fig, 
-        update_plot, 
+        fig,
+        update_plot,
         interval=200,  # 更新间隔200ms
-        blit=True, 
+        blit=True,
         cache_frame_data=False  # 禁用帧缓存，防止内存泄漏
     )
     plt.tight_layout()
